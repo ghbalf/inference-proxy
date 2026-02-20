@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LLM Inference Proxy — Dashboard</title>
+<style>
+  :root { --bg: #0d1117; --card: #161b22; --border: #30363d; --text: #e6edf3;
+           --muted: #8b949e; --accent: #58a6ff; --green: #3fb950; --red: #f85149; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+         background: var(--bg); color: var(--text); padding: 20px; }
+  h1 { font-size: 1.4em; margin-bottom: 16px; color: var(--accent); }
+  h2 { font-size: 1.1em; margin-bottom: 12px; color: var(--muted); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 24px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
+  .card .label { font-size: 0.8em; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
+  .card .value { font-size: 1.6em; font-weight: 600; margin-top: 4px; }
+  .cost { color: var(--green); }
+  table { width: 100%; border-collapse: collapse; margin-bottom: 24px; font-size: 0.9em; }
+  th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; font-size: 0.8em; text-transform: uppercase; }
+  td { font-variant-numeric: tabular-nums; }
+  tr:hover td { background: rgba(88,166,255,0.04); }
+  .chart-container { background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+                     padding: 16px; margin-bottom: 24px; }
+  canvas { width: 100% !important; height: 200px !important; }
+  .controls { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+  .controls select, .controls button { background: var(--card); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 6px 12px; font-size: 0.85em; cursor: pointer; }
+  .controls button:hover, .controls select:hover { border-color: var(--accent); }
+  .error-row { color: var(--red); }
+  .refresh-note { font-size: 0.75em; color: var(--muted); margin-bottom: 16px; }
+</style>
+</head>
+<body>
+
+<h1>LLM Inference Proxy</h1>
+<p class="refresh-note">Auto-refreshes every 30s. <button onclick="loadAll()" style="background:none;border:none;color:var(--accent);cursor:pointer;font-size:inherit;">Refresh now</button></p>
+
+<div class="grid" id="summary-cards"></div>
+
+<div class="controls">
+  <select id="chart-days" onchange="loadTimeseries()">
+    <option value="7">7 days</option>
+    <option value="30" selected>30 days</option>
+    <option value="90">90 days</option>
+  </select>
+  <select id="chart-bucket" onchange="loadTimeseries()">
+    <option value="day" selected>Daily</option>
+    <option value="hour">Hourly</option>
+  </select>
+</div>
+
+<div class="chart-container">
+  <canvas id="chart"></canvas>
+</div>
+
+<h2>By Provider</h2>
+<table id="provider-table"><thead><tr>
+  <th>Provider</th><th>Requests</th><th>Input Tokens</th><th>Output Tokens</th><th>Cost</th>
+</tr></thead><tbody></tbody></table>
+
+<h2>By Model</h2>
+<div class="controls">
+  <select id="model-provider" onchange="loadModels()">
+    <option value="">All Providers</option>
+  </select>
+  <select id="model-days" onchange="loadModels()">
+    <option value="">All Time</option>
+    <option value="7">7 days</option>
+    <option value="30">30 days</option>
+  </select>
+</div>
+<table id="model-table"><thead><tr>
+  <th>Provider</th><th>Model</th><th>Requests</th><th>Input</th><th>Output</th><th>Cost</th>
+</tr></thead><tbody></tbody></table>
+
+<h2>Recent Requests</h2>
+<table id="requests-table"><thead><tr>
+  <th>Time</th><th>Provider</th><th>Model</th><th>Input</th><th>Output</th><th>Cost</th><th>Duration</th><th>Status</th>
+</tr></thead><tbody></tbody></table>
+<div class="controls">
+  <button onclick="loadMoreRequests()">Load More</button>
+</div>
+
+<script>
+const fmt = n => n == null ? '—' : n.toLocaleString();
+const fmtCost = n => n == null ? '—' : '$' + n.toFixed(4);
+const fmtDur = ms => ms == null ? '—' : (ms / 1000).toFixed(2) + 's';
+const fmtTime = ts => {
+  if (!ts) return '—';
+  const d = new Date(ts * 1000);
+  return d.toLocaleString();
+};
+
+let requestOffset = 0;
+const PAGE_SIZE = 50;
+
+async function loadSummary() {
+  const r = await fetch('/stats/summary');
+  const d = await r.json();
+  const t = d.totals;
+  document.getElementById('summary-cards').innerHTML = `
+    <div class="card"><div class="label">Total Requests</div><div class="value">${fmt(t.total_requests)}</div></div>
+    <div class="card"><div class="label">Input Tokens</div><div class="value">${fmt(t.total_input_tokens)}</div></div>
+    <div class="card"><div class="label">Output Tokens</div><div class="value">${fmt(t.total_output_tokens)}</div></div>
+    <div class="card"><div class="label">Total Cost</div><div class="value cost">${fmtCost(t.total_cost_usd)}</div></div>
+  `;
+  const tbody = document.querySelector('#provider-table tbody');
+  tbody.innerHTML = d.by_provider.map(p => `<tr>
+    <td>${p.provider}</td><td>${fmt(p.requests)}</td>
+    <td>${fmt(p.input_tokens)}</td><td>${fmt(p.output_tokens)}</td>
+    <td class="cost">${fmtCost(p.cost_usd)}</td>
+  </tr>`).join('');
+
+  // Populate provider filter
+  const sel = document.getElementById('model-provider');
+  const current = sel.value;
+  sel.innerHTML = '<option value="">All Providers</option>' +
+    d.by_provider.map(p => `<option value="${p.provider}">${p.provider}</option>`).join('');
+  sel.value = current;
+}
+
+async function loadModels() {
+  const provider = document.getElementById('model-provider').value;
+  const days = document.getElementById('model-days').value;
+  let url = '/stats/by-model?';
+  if (provider) url += `provider=${provider}&`;
+  if (days) url += `days=${days}&`;
+  const r = await fetch(url);
+  const d = await r.json();
+  const tbody = document.querySelector('#model-table tbody');
+  tbody.innerHTML = d.map(m => `<tr>
+    <td>${m.provider}</td><td>${m.model || '(unknown)'}</td><td>${fmt(m.requests)}</td>
+    <td>${fmt(m.input_tokens)}</td><td>${fmt(m.output_tokens)}</td>
+    <td class="cost">${fmtCost(m.cost_usd)}</td>
+  </tr>`).join('');
+}
+
+async function loadRequests(reset) {
+  if (reset) requestOffset = 0;
+  const r = await fetch(`/stats/requests?limit=${PAGE_SIZE}&offset=${requestOffset}`);
+  const d = await r.json();
+  const tbody = document.querySelector('#requests-table tbody');
+  const html = d.map(rq => {
+    const cls = rq.status_code >= 400 ? ' class="error-row"' : '';
+    return `<tr${cls}>
+      <td>${fmtTime(rq.timestamp)}</td><td>${rq.provider}</td><td>${rq.model || '—'}</td>
+      <td>${fmt(rq.input_tokens)}</td><td>${fmt(rq.output_tokens)}</td>
+      <td class="cost">${fmtCost(rq.cost_usd)}</td><td>${fmtDur(rq.duration_ms)}</td>
+      <td>${rq.status_code}${rq.streaming ? ' (stream)' : ''}</td>
+    </tr>`;
+  }).join('');
+  if (reset) tbody.innerHTML = html;
+  else tbody.innerHTML += html;
+}
+
+function loadMoreRequests() {
+  requestOffset += PAGE_SIZE;
+  loadRequests(false);
+}
+
+// Simple canvas chart — no external dependencies
+let chartData = [];
+async function loadTimeseries() {
+  const days = document.getElementById('chart-days').value;
+  const bucket = document.getElementById('chart-bucket').value;
+  const r = await fetch(`/stats/timeseries?days=${days}&bucket=${bucket}`);
+  chartData = await r.json();
+  drawChart();
+}
+
+function drawChart() {
+  const canvas = document.getElementById('chart');
+  const ctx = canvas.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = rect.width * dpr;
+  canvas.height = rect.height * dpr;
+  ctx.scale(dpr, dpr);
+  const W = rect.width, H = rect.height;
+
+  ctx.clearRect(0, 0, W, H);
+  if (chartData.length === 0) {
+    ctx.fillStyle = '#8b949e';
+    ctx.font = '14px sans-serif';
+    ctx.fillText('No data', W / 2 - 25, H / 2);
+    return;
+  }
+
+  const pad = { top: 20, right: 20, bottom: 40, left: 60 };
+  const cw = W - pad.left - pad.right;
+  const ch = H - pad.top - pad.bottom;
+  const costs = chartData.map(d => d.cost_usd);
+  const tokens = chartData.map(d => d.total_tokens);
+  const maxCost = Math.max(...costs, 0.001);
+  const maxTokens = Math.max(...tokens, 1);
+  const n = chartData.length;
+  const barW = Math.max(2, cw / n - 2);
+
+  // Draw token bars
+  ctx.fillStyle = 'rgba(88,166,255,0.3)';
+  for (let i = 0; i < n; i++) {
+    const x = pad.left + (i / n) * cw;
+    const h = (tokens[i] / maxTokens) * ch;
+    ctx.fillRect(x, pad.top + ch - h, barW, h);
+  }
+
+  // Draw cost line
+  ctx.strokeStyle = '#3fb950';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  for (let i = 0; i < n; i++) {
+    const x = pad.left + (i / n) * cw + barW / 2;
+    const y = pad.top + ch - (costs[i] / maxCost) * ch;
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+
+  // Axes
+  ctx.strokeStyle = '#30363d';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(pad.left, pad.top);
+  ctx.lineTo(pad.left, pad.top + ch);
+  ctx.lineTo(pad.left + cw, pad.top + ch);
+  ctx.stroke();
+
+  // Labels
+  ctx.fillStyle = '#8b949e';
+  ctx.font = '11px sans-serif';
+  ctx.fillText(fmt(maxTokens) + ' tok', pad.left + 4, pad.top + 12);
+  ctx.fillStyle = '#3fb950';
+  ctx.fillText(fmtCost(maxCost), W - pad.right - 60, pad.top + 12);
+
+  // X-axis labels (show a few)
+  ctx.fillStyle = '#8b949e';
+  const step = Math.max(1, Math.floor(n / 6));
+  for (let i = 0; i < n; i += step) {
+    const x = pad.left + (i / n) * cw;
+    const label = chartData[i].bucket.slice(5); // strip year
+    ctx.save();
+    ctx.translate(x + barW / 2, pad.top + ch + 8);
+    ctx.rotate(Math.PI / 5);
+    ctx.fillText(label, 0, 0);
+    ctx.restore();
+  }
+
+  // Legend
+  ctx.fillStyle = 'rgba(88,166,255,0.5)';
+  ctx.fillRect(pad.left + cw - 120, pad.top, 10, 10);
+  ctx.fillStyle = '#8b949e';
+  ctx.fillText('Tokens', pad.left + cw - 106, pad.top + 9);
+  ctx.fillStyle = '#3fb950';
+  ctx.fillRect(pad.left + cw - 50, pad.top, 10, 10);
+  ctx.fillText('Cost', pad.left + cw - 36, pad.top + 9);
+}
+
+window.addEventListener('resize', drawChart);
+
+function loadAll() {
+  loadSummary();
+  loadModels();
+  loadRequests(true);
+  loadTimeseries();
+}
+
+loadAll();
+setInterval(loadAll, 30000);
+</script>
+</body>
+</html>
