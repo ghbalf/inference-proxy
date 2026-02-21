@@ -293,13 +293,13 @@ async def _handle_streaming(
     stream_parser = get_stream_parser(parser_type, endpoint)
 
     try:
-        upstream = await http_client.stream(
+        req = http_client.build_request(
             method=method,
             url=target_url,
             headers=headers,
             content=raw_body,
         )
-        response = await upstream.__aenter__()
+        response = await http_client.send(req, stream=True)
     except httpx.RequestError as e:
         duration_ms = (time.time() - start_time) * 1000
         await db.log_request(
